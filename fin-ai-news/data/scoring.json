@@ -1,0 +1,101 @@
+{
+  "_meta": {
+    "name": "sentiment_scoring",
+    "version": "3.3.2",
+    "updated": "2026-10-23",
+    "usage": "舆情监控官 Step2/Step3 分级公式，与应急交易员 Step1 同源。总分 = 情绪分×0.4 + 涉事深度×0.3 + 传播量级×0.3，各分项 0-100，统一方向后『越低越危急』。禁止 LLM 心算，必须运行 scripts/classify.py。 v3.3.2：grading 各档新增 thresholds 结构化字段，classify.py 改为直接读取（旧版硬编码在脚本里，改配置无效）。",
+    "script": "python scripts/classify.py --sentiment <0-100> --involvement <0-100> --spread <0-100> [--age-hours <n>]"
+  },
+  "direction": {
+    "rule": "越低越危急（0 = 最危急，100 = 中性）",
+    "sentiment": "直接采用（越低越负面）",
+    "involvement": "原始 scale 为『越高越重大』，计入前取 (100 - 原始分)",
+    "spread": "原始 scale 为『越高传播越广』，计入前取 (100 - 原始分)",
+    "why": "v3.3.0 修正：旧版直接把 involvement=100(监管)/spread=100(央媒) 当作高分计入，导致最严重舆情算得 64 分只能判 P2，而 P0 条件 score<25 在 involvement>=80 时数学上恒不可达（0.3×80=24，再叠加传播项必 >25）。统一方向后该场景得 4 分，正确判为 P0。"
+  },
+  "weights": {
+    "sentiment": 0.4,
+    "involvement": 0.3,
+    "spread": 0.3
+  },
+  "sentiment_scale": {
+    "method": "LLM 情绪判读（负面→低分），输出 0-100",
+    "anchors": {
+      "severe_negative": 0,
+      "negative": 35,
+      "neutral": 60,
+      "positive": 85
+    }
+  },
+  "involvement_scale": {
+    "regulator_or_law": 100,
+    "listed_company_material": 80,
+    "peer_company": 50,
+    "industry_general": 30
+  },
+  "spread_scale": {
+    "method": "媒体等级加权阅读/传播量映射 0-100",
+    "tiers": {
+      "tier1_centrals": 100,
+      "tier1_finance": 80,
+      "portal": 60,
+      "self_media_only": 30
+    }
+  },
+  "grading": [
+    {
+      "level": "P0",
+      "label": "危急",
+      "condition": "score < 25 AND involvement >= 80 AND sentiment <= 25",
+      "action": "上报主理人，由主理人启动 fin-ai-crisis 应急流水线",
+      "thresholds": {
+        "max_score": 25,
+        "min_involvement": 80,
+        "max_sentiment": 25
+      }
+    },
+    {
+      "level": "P1",
+      "label": "重要",
+      "condition": "score < 45 AND involvement >= 60",
+      "action": "写入团队作战大屏 + 当日舆情日报",
+      "thresholds": {
+        "max_score": 45,
+        "min_involvement": 60
+      }
+    },
+    {
+      "level": "P2",
+      "label": "关注",
+      "condition": "score < 60 OR involvement >= 50",
+      "action": "写入团队作战大屏，持续观察",
+      "thresholds": {
+        "max_score": 60,
+        "min_involvement": 50
+      },
+      "logic": "OR"
+    },
+    {
+      "level": "P3",
+      "label": "中性",
+      "condition": "其余",
+      "action": "仅记录，不推送",
+      "thresholds": {
+        "max_score": null,
+        "min_involvement": null
+      }
+    }
+  ],
+  "grading_reachability_check": {
+    "P0": "监管立案(100) + 央媒(100) + 极度负面(10) → 4.0 分 ✔ 可达",
+    "P1": "上市公司重大(80) + 门户(60) + 负面(20) → 26.0 分 ✔ 可达",
+    "P2": "同行(50) + 财经一级(80) + 偏负面(35) → 35.0 分 ✔ 可达",
+    "P3": "正面(85) + 行业泛化(30) + 自媒体(30) → 76.0 分 ✔ 可达"
+  },
+  "time_decay": {
+    "formula": "score_t = 100 - (100 - score_0) × 0.85^t，t 为天数（向中性 100 回归）",
+    "p0_grace_hours": 48,
+    "why": "v3.3.0 修正：旧写『每过 24h 总分×0.85』会让危急事件（20 分）越放越严重（14 分），与『衰减』语义相反"
+  },
+  "dedup": "同一事件多源报道按 (主体+事件关键词) 聚类去重，取最高传播量源为主源"
+}

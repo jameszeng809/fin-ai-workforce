@@ -1,0 +1,80 @@
+{
+  "_meta": {
+    "name": "stress_scenarios",
+    "version": "3.3.2",
+    "updated": "2026-10-23",
+    "usage": "风控官 Step5 压力测试情景库。v3.3.2 起由 scripts/stress_test.py 直接读取并计算，禁止 LLM 临场编造情景或心算损失。修改情景须同步版本号。",
+    "script": "python scripts/stress_test.py --weights 0.3,0.25,0.2,0.15,0.1 [--industries 食品饮料,新能源,银行,非银,其他] [--beta 1.0] [--illiquid-weight 0.1]"
+  },
+  "scenarios": [
+    {
+      "id": "SC-2015",
+      "name": "历史回放：2015 年股灾",
+      "period": "2015-06-15 ~ 2016-01-28",
+      "historical": true,
+      "index_shock": -0.45,
+      "note": "上证指数 5178→2638，成长股普遍腰斩"
+    },
+    {
+      "id": "SC-2018",
+      "name": "历史回放：2018 年中美贸易摩擦",
+      "period": "2018-01-29 ~ 2019-01-04",
+      "historical": true,
+      "index_shock": -0.28,
+      "note": "上证 3587→2440"
+    },
+    {
+      "id": "SC-2020",
+      "name": "历史回放：2020 新冠冲击",
+      "period": "2020-01-14 ~ 2020-03-23",
+      "historical": true,
+      "index_shock": -0.13,
+      "note": "A股跌幅浅于海外，科技股 V 型反转"
+    },
+    {
+      "id": "SC-2024",
+      "name": "历史回放：2024 年初微盘股流动性危机",
+      "period": "2024-01-02 ~ 2024-02-07",
+      "historical": true,
+      "index_shock": -0.27,
+      "note": "中证2000/微盘股指数最大回撤，量化策略普遍受创"
+    },
+    {
+      "id": "SC-SECTOR",
+      "name": "假设：重仓行业集体跌停",
+      "historical": false,
+      "rule": "top1_industry_weight * -0.10 * 2",
+      "note": "行业权重×两日两跌停近似冲击",
+      "apply": {
+        "op": "industry_shock",
+        "per_day_shock": -0.1,
+        "days": 2,
+        "target": "最大单一行业权重"
+      }
+    },
+    {
+      "id": "SC-BLACKSWAN",
+      "name": "假设：单股黑天鹅",
+      "historical": false,
+      "rule": "max_position_weight * -0.80",
+      "note": "最大持仓单股跌 80%（参考康美/恒大类事件）",
+      "apply": {
+        "op": "position_shock",
+        "shock": -0.8,
+        "target": "最大单一持仓权重"
+      }
+    },
+    {
+      "id": "SC-LIQ",
+      "name": "假设：流动性冻结",
+      "historical": false,
+      "rule": "illiquid_positions * -0.20",
+      "note": "日均成交额后 30% 的持仓按 -20% 冲击",
+      "apply": {
+        "op": "liquidity_shock",
+        "shock": -0.2,
+        "target": "低流动性持仓权重合计"
+      }
+    }
+  ]
+}

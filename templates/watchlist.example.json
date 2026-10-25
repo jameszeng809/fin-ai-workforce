@@ -1,0 +1,36 @@
+{
+  "_readme": "复制本文件为 watchlist.json 后填入你的真实持仓。复制 Copy this file to watchlist.json and fill in your holdings.",
+  "_schema": "groups[].positions[] = {code, name, market, weight, cost, shares}",
+  "version": "1.0",
+  "updated_at": "2026-10-25",
+  "groups": [
+    {
+      "name": "示范组合 demo-cross-market",
+      "note": "跨市场 5 只，覆盖 A股/港股/美股 Five names across CN/HK/US markets",
+      "positions": [
+        {"code": "sh600519", "name": "贵州茅台 Kweichow Moutai", "market": "cn", "weight": 0.30, "cost": 1250.00, "shares": 100},
+        {"code": "hk00700",  "name": "腾讯控股 Tencent",          "market": "hk", "weight": 0.25, "cost": 380.00,  "shares": 200},
+        {"code": "sz300750", "name": "宁德时代 CATL",              "market": "cn", "weight": 0.20, "cost": 210.00,  "shares": 300},
+        {"code": "usTSLA",   "name": "特斯拉 Tesla",               "market": "us", "weight": 0.15, "cost": 240.00,  "shares": 100},
+        {"code": "sz000858", "name": "五粮液 Wuliangye",           "market": "cn", "weight": 0.10, "cost": 150.00,  "shares": 200}
+      ]
+    },
+    {
+      "name": "高股息组合 dividend-focus",
+      "note": "示例：现金奶牛 six names skewed to high dividend yield",
+      "positions": [
+        {"code": "sh600519", "name": "贵州茅台", "market": "cn", "weight": 0.20, "cost": 1200.00, "shares": 100},
+        {"code": "sz000858", "name": "五粮液",   "market": "cn", "weight": 0.20, "cost": 140.00,  "shares": 500},
+        {"code": "sh601398", "name": "工商银行", "market": "cn", "weight": 0.20, "cost": 4.80,    "shares": 5000},
+        {"code": "sh600036", "name": "招商银行", "market": "cn", "weight": 0.20, "cost": 32.00,   "shares": 1000},
+        {"code": "sh601857", "name": "中国石油", "market": "cn", "weight": 0.20, "cost": 7.20,    "shares": 3000}
+      ]
+    }
+  ],
+  "_notes": [
+    "code 格式支持 sh600519 / hk00700 / usAAPL 三种写法 Code accepts sh600519 / hk00700 / usAAPL",
+    "weight 为组合权重，建议同一分组内合计为 1.0 Weights inside a group should sum to 1.0",
+    "cost 为持仓成本价，用于计算浮动盈亏 cost basis is used for unrealized PnL",
+    "watchlist.json 已被 .gitignore 忽略，你的真实持仓不会被提交 your private holdings stay local"
+  ]
+}

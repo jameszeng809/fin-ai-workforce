@@ -1,0 +1,31 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+
+# ---- 运行产物 / generated artifacts ----
+outputs/
+reports/
+*.html
+!README*.html
+team_package.json
+!fin-ai-orchestrator/data/team_package.schema.json
+logs/
+*.log
+
+# ---- 私有数据 / private data ----
+# 你的真实持仓清单不要提交到公开仓库
+watchlist.json
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ---- Jupyter ----
+.ipynb_checkpoints/

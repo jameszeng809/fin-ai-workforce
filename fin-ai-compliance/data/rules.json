@@ -1,0 +1,257 @@
+{
+  "_meta": {
+    "name": "compliance_rules",
+    "version": "3.4.1",
+    "updated": "2026-10-25",
+    "rule_count": {"PL": 3, "IL": 2, "RE": 5, "EX": 3, "SU": 3, "ID": 5, "total": 21},
+    "usage": "所有阈值由本文件驱动，修改阈值必须同步标注法规依据。合规专员 Step1/Step4、风控官 Step6、研究员 Step6 共用。 v3.4.0：新增 scripts/check_rules.py 直接读取本文件执行检查（旧版规则库仅由 LLM 阅读，合规专员是 9 名员工中唯一无脚本的）；executability/risk_events 新增 check_struct 结构化字段，使规则可被脚本通用求值。改本文件立即影响检查结果。 v3.4.1：补齐 investor_suitability(SU×3) 与 disclosure(ID×5)——旧版 SKILL.md 在 Step1/Step2 文案中承诺了『投资者适当性』与『信息披露合规』两类检查，规则库里却没有对应条目，等于承诺落空；现六大类全部有规可查。SU 段输入来自 --investor-file（投资者画像），ID 段逐只持仓检查。"
+  },
+  "position_limits": [
+    {
+      "rule_id": "PL-01",
+      "name": "单只公募基金持单一股票上限",
+      "threshold": 0.1,
+      "unit": "ratio_of_fund_nav",
+      "legal_basis": "《公开募集证券投资基金运作管理办法》第三十二条",
+      "action": "red_alert"
+    },
+    {
+      "rule_id": "PL-02",
+      "name": "同一管理人旗下基金合计持单一股票上限",
+      "threshold": 0.1,
+      "unit": "ratio_of_stock_float",
+      "legal_basis": "《公开募集证券投资基金运作管理办法》第三十二条",
+      "action": "red_alert"
+    },
+    {
+      "rule_id": "PL-03",
+      "name": "开放式基金股票资产下限",
+      "threshold": 0.8,
+      "unit": "ratio_of_nav",
+      "legal_basis": "《公开募集证券投资基金运作管理办法》第三十条",
+      "action": "yellow_alert"
+    }
+  ],
+  "industry_limits": [
+    {
+      "rule_id": "IL-01",
+      "name": "单行业集中度软上限（内部风控）",
+      "threshold": 0.3,
+      "unit": "ratio_of_portfolio",
+      "legal_basis": "内部风控制度（非法规强制）",
+      "action": "orange_alert"
+    },
+    {
+      "rule_id": "IL-02",
+      "name": "HHI 行业集中度上限（内部风控）",
+      "threshold": 0.25,
+      "unit": "hhi",
+      "legal_basis": "内部风控制度（非法规强制）",
+      "action": "yellow_alert"
+    }
+  ],
+  "risk_events": [
+    {
+      "rule_id": "RE-01",
+      "name": "大股东质押率预警",
+      "threshold": 0.8,
+      "unit": "ratio_of_holding_pledged",
+      "legal_basis": "沪深交易所《股票质押式回购交易及登记结算业务办法（2018年修订）》",
+      "action": "orange_alert"
+    },
+    {
+      "rule_id": "RE-02",
+      "name": "限售解禁占比预警",
+      "threshold": 0.3,
+      "unit": "ratio_of_float_shares",
+      "legal_basis": "内部风控制度（非法规强制）",
+      "action": "orange_alert"
+    },
+    {
+      "rule_id": "RE-03",
+      "name": "ST/*ST 退市风险警示",
+      "threshold": "is_st == true",
+      "unit": "boolean",
+      "legal_basis": "上交所/深交所《股票上市规则》第九章",
+      "action": "red_alert",
+      "check_struct": {
+        "field": "is_st",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "rule_id": "RE-04",
+      "name": "单日跌幅异常预警",
+      "threshold": 0.08,
+      "unit": "daily_return",
+      "legal_basis": "内部风控制度（非法规强制）",
+      "action": "red_alert"
+    },
+    {
+      "rule_id": "RE-05",
+      "name": "大股东减持预警",
+      "threshold": 0.03,
+      "unit": "ratio_of_total_shares_per_90d",
+      "legal_basis": "《上市公司股东减持股份管理暂行办法》（2024）",
+      "action": "orange_alert"
+    }
+  ],
+  "investor_suitability": [
+    {
+      "rule_id": "SU-01",
+      "name": "产品风险等级高于投资者风险承受能力（适当性不匹配）",
+      "threshold": "investor_risk_level >= product_risk_level",
+      "unit": "risk_level_match",
+      "legal_basis": "《中华人民共和国证券法》第八十八条（证券公司适当性义务：不得向投资者销售与其风险承受能力不匹配的证券）",
+      "action": "red_alert",
+      "check_struct": {
+        "field": "suitability_mismatch",
+        "op": "eq",
+        "value": true,
+        "desc": "由 --investor-file 的 investor_risk_level(C1-C5) 与 product_risk_level(R1-R5) 比对得出"
+      }
+    },
+    {
+      "rule_id": "SU-02",
+      "name": "向普通投资者主动推介高风险等级产品",
+      "threshold": "professional_investor == true OR product_risk_level <= R3",
+      "unit": "boolean",
+      "legal_basis": "《证券期货投资者适当性管理办法》（证监会令第176号，2020修订）普通投资者特别保护条款",
+      "action": "red_alert",
+      "check_struct": {
+        "field": "high_risk_push_to_retail",
+        "op": "eq",
+        "value": true,
+        "desc": "普通投资者 + R4/R5 产品 + 主动推介"
+      }
+    },
+    {
+      "rule_id": "SU-03",
+      "name": "投资者风险测评结果过期（超过 2 年未更新）",
+      "threshold": 2,
+      "unit": "years",
+      "legal_basis": "《证券期货投资者适当性管理办法》第六条（投资者分类与持续管理）",
+      "action": "orange_alert",
+      "check_struct": {
+        "field": "risk_assessment_age_years",
+        "op": "gt",
+        "value": 2,
+        "desc": "风险测评距今年限，超 2 年须重新测评后方可继续推介"
+      }
+    }
+  ],
+  "disclosure": [
+    {
+      "rule_id": "ID-01",
+      "name": "定期报告未在法定期限内披露",
+      "threshold": 0,
+      "unit": "days_overdue",
+      "legal_basis": "《中华人民共和国证券法》第七十九条（年报 4 个月内、中报 2 个月内）",
+      "action": "red_alert",
+      "check_struct": {
+        "field": "report_overdue_days",
+        "op": "gt",
+        "value": 0,
+        "desc": "超过法定期限的天数（未逾期为 0）"
+      }
+    },
+    {
+      "rule_id": "ID-02",
+      "name": "业绩预告/快报大幅修正（业绩变脸）",
+      "threshold": 0.2,
+      "unit": "deviation_ratio",
+      "legal_basis": "《上市公司信息披露管理办法》（证监会令第182号）业绩预告修正要求",
+      "action": "orange_alert",
+      "check_struct": {
+        "field": "preforecast_deviation_pct",
+        "op": "gt",
+        "value": 0.2,
+        "desc": "业绩预告与实际值偏离幅度（绝对值）"
+      }
+    },
+    {
+      "rule_id": "ID-03",
+      "name": "重大事件未在规定期限内履行临时报告义务",
+      "threshold": 2,
+      "unit": "trading_days",
+      "legal_basis": "《中华人民共和国证券法》第八十条（重大事件临时报告）",
+      "action": "red_alert",
+      "check_struct": {
+        "field": "material_event_delay_days",
+        "op": "gt",
+        "value": 2,
+        "desc": "重大事件发生至公告的交易日间隔，超过 2 个交易日即违规"
+      }
+    },
+    {
+      "rule_id": "ID-04",
+      "name": "控股股东股份质押/司法冻结未及时披露",
+      "threshold": "pledge_undisclosed == true",
+      "unit": "boolean",
+      "legal_basis": "《中华人民共和国证券法》第八十条 + 《上市公司信息披露管理办法》",
+      "action": "orange_alert",
+      "check_struct": {
+        "field": "pledge_undisclosed",
+        "op": "eq",
+        "value": true,
+        "desc": "存在质押/冻结事实但未检索到对应公告"
+      }
+    },
+    {
+      "rule_id": "ID-05",
+      "name": "大股东减持未按规定预披露减持计划",
+      "threshold": "reduction_without_predisclosure == true",
+      "unit": "boolean",
+      "legal_basis": "《上市公司股东减持股份管理暂行办法》（2024年5月施行）减持预披露要求（首次卖出前 15 个交易日）",
+      "action": "orange_alert",
+      "check_struct": {
+        "field": "reduction_without_predisclosure",
+        "op": "eq",
+        "value": true,
+        "desc": "已发生减持但未检索到预披露公告"
+      }
+    }
+  ],
+  "executability": [
+    {
+      "rule_id": "EX-01",
+      "name": "停牌股不可交易",
+      "check": "suspension == true",
+      "action": "block_trade",
+      "note": "应急减仓方案必须先过本检查",
+      "check_struct": {
+        "field": "suspension",
+        "op": "eq",
+        "value": true,
+        "desc": "标的停牌"
+      }
+    },
+    {
+      "rule_id": "EX-02",
+      "name": "跌停封板卖出受限",
+      "check": "limit_down == true",
+      "action": "defer_to_next_session",
+      "note": "转下一交易日分批执行，方案中标注",
+      "check_struct": {
+        "field": "limit_down",
+        "op": "eq",
+        "value": true,
+        "desc": "标的跌停封板"
+      }
+    },
+    {
+      "rule_id": "EX-03",
+      "name": "流动性下限",
+      "check": "order_value <= 0.10 * avg_daily_turnover_20d",
+      "action": "split_order",
+      "note": "超限必须拆单，转交易执行官",
+      "check_struct": {
+        "field": "participation",
+        "op": "gt",
+        "value": 0.1,
+        "desc": "委托额 / 20日日均成交额，超过即需拆单"
+      }
+    }
+  ]
+}

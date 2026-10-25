@@ -1,0 +1,39 @@
+{
+  "_meta": {
+    "name": "consensus_scoring",
+    "version": "3.3.0",
+    "updated": "2026-10-21",
+    "usage": "CIO 主理人第 3 轮圆桌综合的共识度公式。所有权重可调，修改须同步版本号。禁止 LLM 拍脑袋给共识度，必须运行 scripts/consensus.py。",
+    "script": "python scripts/consensus.py --peer-scores 4,4,5 --disputes-total 5 --disputes-resolved 4 --data-consistency 0.9",
+    "weights": {
+      "peer_review": 0.4,
+      "dispute_resolution": 0.3,
+      "data_consistency": 0.3
+    }
+  },
+  "formula": "consensus_score = 0.4 * peer_review_consistency + 0.3 * dispute_resolution_rate + 0.3 * data_consistency",
+  "components": {
+    "peer_review_consistency": {
+      "desc": "员工互评分离度：1 - (互评标准差 / 互评均值)，取 0-1",
+      "note": "互评分越集中，团队越一致；弃权(abstain)的评分对从分子分母中同时剔除，不稀释"
+    },
+    "dispute_resolution_rate": {
+      "desc": "第 1 轮质疑中被主理人裁决解决的分歧数 / 总分歧数"
+    },
+    "data_consistency": {
+      "desc": "各员工引用同一指标（如最新收盘价、PE_TTM）数值偏差 <1% 的比例"
+    }
+  },
+  "abstain_rule": "员工输出 abstain=true 时，其观点与评分不参与上述三项计算，并在圆桌纪要中列为『缺席视角』",
+  "signal_aggregation": {
+    "desc": "观点→权重：目标权重_t = (sum_i w_i * signal_i_t) / (sum_i w_i * |signal_i_t|) * gross_target / sum_t |signal_t|",
+    "note": "弃权模型不进入分子分母（对标 ai-hedge-fund blend_signals）；归一化后必须过风控官硬夹逼"
+  },
+  "hard_limits": {
+    "max_position_pct": 0.1,
+    "max_industry_pct": 0.3,
+    "max_gross_exposure": 1.0,
+    "enforced_by": "fin-ai-risk",
+    "principle": "Conviction requests, risk disposes——分析师无权覆盖风控上限"
+  }
+}
