@@ -104,7 +104,57 @@ python shared/fin_data.py finance sh600519
 python shared/fin_data.py list                  # all endpoints
 ```
 
-To use an employee, copy its folder into your agent's skills directory (for example WorkBuddy's `~/.workbuddy/skills/`) or follow the install section in its `SKILL.md`.
+### Installing into your agent (use the installer — don't hand-copy)
+
+**Do not copy a single employee folder into your skills directory.** Every
+`SKILL.md` instructs the agent to run `python shared/fin_data.py …`, and that
+`shared/` folder lives at the repository *root*. Hand-copying one employee
+leaves its documented data path dangling, so it dies on its first tool call.
+That was a real v4.0.0 defect; v4.1.0 fixes it with an installer.
+
+```bash
+python install.py                 # auto-detects ~/.workbuddy/skills, ~/.codebuddy/skills, …
+python install.py --target <dir>  # explicit destination
+python install.py --json          # machine readable
+python install.py --uninstall     # remove
+```
+
+The installer puts all nine employees under one parent and **plants the shared
+data layer into each one**, then verifies every install (SKILL.md present, data
+layer present, script count) and prints `BROKEN` if anything is missing.
+
+```text
+employee              SKILL.md   data layer  scripts
+--------------------------------------------------------
+fin-ai-compliance     True       True        1
+fin-ai-crisis         True       True        3
+…                                            …
+run: python <skills>/fin-ai-compliance/shared/fin_data.py quote sh600519
+```
+
+Need a subset? `python install.py --only fin-ai-risk,fin-ai-quant`. The team
+still shares one parent directory, which is what cross-skill delegation relies
+on (`portfolio/backtest` → `quant/backtest`, `crisis/classify` → `news/classify`).
+
+### End-to-end roundtable
+
+Run all nine employees against one real subject — A-share, HK or US — with live
+data and every metric produced by the employee's own script:
+
+```bash
+python tools/e2e_roundtable.py --symbol sh600519
+python tools/e2e_roundtable.py --symbol usTSLA --json
+python tools/selfcheck.py                     # full repository self-check
+```
+
+```text
+[PASS] researcher · DCF valuation    1287.86 CNY/share (base: FY2025 net profit 82.32B CNY…)
+[PASS] quant · Markowitz (auto min-var) mode=markowitz_min_variance infeasible=False
+[PASS] risk · VaR / CVaR             VaR95(1d)=0.0227 CVaR99=0.0361
+[PASS] execution · impact cost       participation=0.0069 impact=3.8bps algo=Sniper
+[PASS] consensus score               0.863 / uncertainty=low / unresolved=1
+Result: 17/17 checks passed
+```
 
 **Optional upgrades (still no API key):**
 
@@ -163,6 +213,36 @@ Each employee ships: `SKILL.md` (role & pipeline) · `scripts/` (stdlib-only cal
 
 > **Why every calculator uses the standard library only?**
 > An earlier version depended on numpy. On any machine without it, the whole "scripts must run, no mental math" pipeline died with `ModuleNotFoundError`. Everything is now **pure Python 3.8+ stdlib**.
+
+---
+
+## 🧪 Bugs found by actually installing and running it
+
+v4.1.0 is not a docs refresh — it is what came out of installing all nine
+employees into a real agent and pointing them at real markets. Every row below
+was reproduced end to end.
+
+| # | Symptom | Root cause | Fix |
+|---|---|---|---|
+| 1 | Employee dies on first tool call: `can't open file '…/shared/fin_data.py'` | `shared/` sits at the repo root, so hand-copying one employee leaves its documented path dangling | New `install.py` plants the data layer into every employee it installs and verifies each one |
+| 2 | US quotes (Tesla/Apple) come back empty every time | `tx_symbol()` lower-cased the whole code to `ustsla`, but Tencent's GBK payload keys it `v_usTSLA` | Lower-case only the market prefix; keep the ticker's own case |
+| 3 | US K-line returns just 2 rows (one from 2011, one latest) | Tencent serves a stub history for US tickers without an exchange suffix | Try `usTSLA.OQ`-style suffixes automatically, add Nasdaq as a fallback channel |
+| 4 | The execution employee rejects **every** order as "exceeds daily turnover" | Tencent/Eastmoney report A-share volume in 手 (lots of 100 shares); it was read as shares, understating ADV by 100x | Data layer now normalises units and emits `shares` / `amount` / `volume_unit` |
+| 5 | Financials always return `null` for revenue and net profit | Code asked for `TOTAL_OPERATE_INCOME`; the real Eastmoney column is `TOTALOPERATEREVE` | Read the real column names, and add a Nasdaq income-statement channel for US tickers |
+| 6 | A conservative investor buying a high-risk product is reported as "0 suitability violations" | When the profile field names don't match, the SU rule section is skipped silently — a false negative | Alias tolerance plus a mandatory `su_skip_reason` stating suitability was **not** verified |
+
+v4.2.0 pushed all three markets to green and surfaced four more:
+
+| # | Symptom | Root cause | Fix |
+|---|---|---|---|
+| 7 | Hong Kong DCF impossible; `finance` returns `no financial record for 00700.HK` | HK statements come from a different endpoint (`RPT_HKF10_FN_INCOME`) and arrive as a **long** table — one row per line item, unlike the A-share wide table | New HK channel: pivot long→wide per report date, prefer annual reports (`DATE_TYPE_CODE=001`) |
+| 8 | Tencent's DCF lands ~15% below the market price, **with no error** | HK names trade in HKD but file in RMB — dividing one by the other is a cross-currency comparison | New `fx` endpoint (ECB reference rates): DCF converts explicitly and prints the rate; if the rate is unavailable the DCF refuses to produce a number |
+| 9 | Tesla's DCF prints \$18.83 against a \$391.62 price and looks broken | A net-profit-as-FCFF proxy simply does not suit a high-growth name | **Method-applicability guard**: when the gap exceeds 50%, say so and recommend relative / sum-of-the-parts valuation as the primary method |
+| 10 | When financials are unavailable, the report still prints "DCF centre ¥385.2" | The skip branch fell back to the spot price but the verdict text did not change | Print "DCF skipped (reason)" — never dress up the spot price as a valuation |
+
+> Rows 4, 6 and 8 are *silent* failures: no exception, no warning, just confidently
+> wrong output. They are the best argument for this project's rule — prefer an
+> honest `unavailable` over a quietly backfilled estimate.
 
 ---
 

@@ -46,8 +46,16 @@ def load_weights(path_or_literal):
         except ValueError as e:
             sys.exit(json.dumps({"error": f"权重解析失败: {e}；请传 JSON 文件路径或 JSON 字符串"},
                                 ensure_ascii=False))
+    # 兼容多智能体协作的下游输出：`{"贵州茅台": 0.45, ...}` 映射形式。
+    # 上游员工（如投研经理）常直接产出 名称->权重 字典，硬性要求数组会让流水线断在这里。
+    if isinstance(data, dict):
+        data = [{"name": k, "code": k, "weight": v} for k, v in data.items()]
     if not isinstance(data, list) or not data:
-        sys.exit(json.dumps({"error": "weight 必须为非空数组"}, ensure_ascii=False))
+        sys.exit(json.dumps(
+            {"error": "weight 必须为非空数组，形如 "
+                      "[{\"code\":\"sh600519\",\"name\":\"贵州茅台\",\"industry\":\"食品饮料\","
+                      "\"weight\":0.30}]；也接受 {\"贵州茅台\":0.30} 映射形式"},
+            ensure_ascii=False))
     norm = []
     for i, it in enumerate(data):
         if not isinstance(it, dict):

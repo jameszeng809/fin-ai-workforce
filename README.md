@@ -111,9 +111,58 @@ python shared/fin_data.py finance sh600519      # 财务指标 financials
 python shared/fin_data.py list                  # 全部端点 all endpoints
 ```
 
-把任意员工目录复制到你的 Agent 技能目录（如 WorkBuddy `~/.workbuddy/skills/`），或按其 `SKILL.md` 安装即可使用。
+### 安装到你的 Agent（关键：必须用安装脚本）
 
-Copy any employee folder into your agent's skills directory (e.g. WorkBuddy `~/.workbuddy/skills/`), or follow the install section inside its `SKILL.md`.
+**不要直接把单个员工目录复制进 skills 目录。** 每个 `SKILL.md` 都要求执行
+`python shared/fin_data.py …`，而 `shared/` 位于仓库根目录——单独复制一个员工过去，
+它的文档路径并不存在，员工会在第一次取数时直接挂掉（v4.0.0 的实际缺陷，v4.1.0 已修）。
+
+```bash
+python install.py                 # 自动识别 ~/.workbuddy/skills、~/.codebuddy/skills 等
+python install.py --target <dir>  # 指定目录
+python install.py --json          # 机器可读输出
+python install.py --uninstall     # 卸载
+```
+
+安装器会把 9 名员工装到同一父目录，并为**每一名员工植入 `shared/` 数据层**，
+安装后自动逐项校验（SKILL.md / 数据层 / 脚本数），任何一项缺失会直接报 BROKEN。
+
+```text
+employee              SKILL.md   data layer  scripts
+--------------------------------------------------------
+fin-ai-compliance     True       True        1
+fin-ai-crisis         True       True        3
+…                                            …
+run: python <skills>/fin-ai-compliance/shared/fin_data.py quote sh600519
+```
+
+Need more control? `python install.py --only fin-ai-risk,fin-ai-quant` installs a
+subset; the whole team still lands under one parent so cross-skill delegation
+(`portfolio/backtest` → `quant/backtest`, `crisis/classify` → `news/classify`)
+keeps working.
+
+English: **do not copy a single employee folder into your skills directory** —
+each `SKILL.md` calls `shared/fin_data.py`, which lives at the repo root.
+`install.py` plants the shared data layer into every employee it installs.
+
+### 端到端演练 / End-to-end roundtable
+
+一次性把 9 名员工跑通同一个真实标的（A股/港股/美股均可），全部取数真实、全部指标由脚本计算：
+
+```bash
+python tools/e2e_roundtable.py --symbol sh600519
+python tools/e2e_roundtable.py --symbol usTSLA --json
+python tools/selfcheck.py                     # 全仓自检 self-check
+```
+
+```text
+[PASS] researcher · DCF 估值     每股 1287.86 CNY（基数：2025-12-31 归母净利 823.2亿CNY…）
+[PASS] quant · 马科维茨(自动最小方差)  mode=markowitz_min_variance infeasible=False
+[PASS] risk · VaR / CVaR         VaR95(1d)=0.0227 CVaR99=0.0361
+[PASS] execution · 冲击成本/拆单   参与率=0.0069 冲击=3.8bps 建议=Sniper
+[PASS] consensus · 共识度        0.863 / 不确定性=low / 未决分歧=1
+演练结论：17/17 项通过
+```
 
 **可选增强（均无需 API Key）：**
 
@@ -168,8 +217,13 @@ fin-ai-workforce/
 ├── fin-ai-compliance/       ⚖️ 合规专员
 ├── fin-ai-execution/        🎯 交易执行官
 ├── shared/                  🌐 统一数据层 fin_data.py（零依赖核心）
+├── install.py               📦 一键安装器（为每名员工植入 shared/ 数据层）
 ├── templates/               📄 持仓清单等模板
 ├── tools/                   🛠️ 自检 & 迁移脚本
+│   ├── selfcheck.py             全仓自检（81 项：结构/脚本/JSON/数据层冒烟）
+│   ├── migrate_to_open_data.py  去掉私有连接器的一键改造脚本
+│   ├── e2e_roundtable.py        9 员工端到端圆桌演练（支持 A股/港股/美股）
+│   └── bump_version.py          版本号与变更日志统一维护
 └── docs/                    📚 群体智能设计说明
 ```
 
@@ -177,6 +231,34 @@ fin-ai-workforce/
 
 > **为什么所有计算脚本只用标准库？**
 > 旧版脚本依赖 numpy，在未安装的开箱环境直接 `ModuleNotFoundError`，导致"禁止 LLM 心算、必须跑脚本"的流水线整体断裂。现在全部改为**纯 Python 标准库**，任何 Python 3.8+ 环境开箱即用。
+
+---
+
+## 🧪 实战修复记录 / Bugs found by actually installing and running it
+
+v4.1.0 不是文档更新，是把 9 名员工**真的装进 Agent、真的跑真实数据**之后修出来的。下面每一条都在生产链路里复现过：
+
+| # | 症状 Symptom | 根因 Root cause | 修复 Fix |
+|---|---|---|---|
+| 1 | 员工安装后第一次取数就报 `can't open file '…/shared/fin_data.py'` | `shared/` 在仓库根，单独复制员工目录时不会被带过去 | 新增 `install.py`，安装时把数据层植入每一名员工并逐项校验 |
+| 2 | 美股（特斯拉/苹果）行情全部返回空 | `tx_symbol()` 把整个代码小写成 `ustsla`，而腾讯 GBK 返回的键是 `v_usTSLA` | 只把市场前缀小写，ticker 保留原大小写 |
+| 3 | 美股 K 线只返回 2 行（2011 年一条 + 最新一条） | 腾讯对无交易所后缀的美股只给残缺数据 | 自动尝试 `usTSLA.OQ` 等后缀，并列 Nasdaq 做兜底通道 |
+| 4 | 交易执行官把**每一笔**茅台订单判为"超过单日成交额" | 腾讯/东财 A 股成交量单位是「手」（100 股），被当成「股」用，ADV 缩小 100 倍 | 数据层统一归一并输出 `shares` / `amount` / `volume_unit` |
+| 5 | 财报接口 `营收`/`归母净利` 恒为 `null` | 代码用了美式列名 `TOTAL_OPERATE_INCOME`，东财真实列名是 `TOTALOPERATEREVE` | 按东财真实列名重取，并新增美股 Nasdaq 财报通道 |
+| 6 | C1 保守型投资者买 R4 产品，合规报告显示"0 项适当性违规" | 画像字段名不匹配时 SU 规则段被静默跳过，变成假阴性 | 字段别名容错 + `su_skip_reason` 强制显式标注"适当性未校验" |
+
+v4.2.0 继续把三个市场全部跑通，又挖出四条：
+
+| # | 症状 Symptom | 根因 Root cause | 修复 Fix |
+|---|---|---|---|
+| 7 | 港股 DCF 做不出来，`finance` 返回 `no financial record for 00700.HK` | 港股财报走的是另一张接口（`RPT_HKF10_FN_INCOME`）且是**长表**（一科目一行），与 A 股宽表完全不同 | 新增港股通道：按报告期转置成长表→宽表，优先取年报（`DATE_TYPE_CODE=001`） |
+| 8 | 腾讯 DCF 每股价值比现价低约 15%，且**不报任何错** | 港股**以 HKD 报价、却以人民币披露财报**，直接相除等于跨币种比较 | 新增 `fx` 汇率端点（ECB 参考汇率），DCF 显式换算并把汇率写进结论；汇率取不到则拒绝出数 |
+| 9 | 特斯拉 DCF 给出每股 \$18.83，而现价 \$391.62，看着像坏了 | 用净利润替代自由现金流的简化 DCF，本就不适用于高成长标的 | 新增**方法适用性护栏**：偏离现价 >50% 时主动声明"本方法不宜作主结论，宜改用相对/分部估值" |
+| 10 | 财报不可得时，报告末尾仍打印"DCF 中枢 ¥385.2" | 跳过分支把 `base` 回退成了现价，但结论文案没跟着变 | 跳过时改打印"DCF 已跳过（原因）"，绝不把现价包装成估值 |
+
+> 第 4、6、8 条属于**静默错误**——不报错、给个错得离谱的结果。这也是本项目
+> "宁可 unavailable，不用估算值静默填充"原则的反面教材。
+> Items 4, 6 and 8 were *silent* failures: no exception, just a confidently wrong number.
 
 ---
 

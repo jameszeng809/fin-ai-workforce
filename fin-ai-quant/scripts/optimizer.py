@@ -295,8 +295,9 @@ def main():
 
     if not args.mu_file:
         sys.exit(json.dumps({"error": "markowitz 模式必须提供 --mu-file"}, ensure_ascii=False))
-    if args.target_return is None:
-        sys.exit(json.dumps({"error": "markowitz 模式必须提供 --target-return"}, ensure_ascii=False))
+    # 未指定 --target-return 时不再直接报错：退化为全局最小方差组合求解。
+    # 数学上等价于把目标收益设为 b/a（见下方闭包），此时拉格朗日乘子 lam=0。
+    auto_target = args.target_return is None
     mu = load_vector(args.mu_file)
     if len(mu) != n:
         sys.exit(json.dumps({"error": f"预期收益长度({len(mu)}) 与协方差维度({n}) 不一致"},
@@ -314,6 +315,40 @@ def main():
                             ensure_ascii=False))
 
     ones = [1.0] * n
+    # 单资产池在数学上不存在 Markowitz 前沿（ac-b²恒为 0）：此处不做无意义报错，
+    # 直接给"满仓该资产、受单票上限夹逼"的解析解，并用 mode 标注口径。
+    if n == 1:
+        w1, cash1 = clip_to_limit([1.0], max_position)
+        w1, cash_a, rounds1, wf1 = waterfall(w1, max_position, args.cash_cap)
+        vol1 = math.sqrt(max(quad_form(w1, cov), 0.0))
+        out = {
+            "mode": "single_asset_degenerate",
+            "target_return": args.target_return,
+            "target_return_source": ("auto:single_asset" if auto_target else "user"),
+            "achievable_return_on_invested": round(mu[0], 4),
+            "target_return_infeasible": False,
+            "mu_diagnostics": None,
+            "infeasible_note": None,
+            "weights": [round(x, 4) for x in w1],
+            "cash_weight": cash_a,
+            "cash_weight_before_waterfall": cash1,
+            "volatility": round(vol1, 4),
+            "ridge_applied": False,
+            "policy": args.policy,
+            "max_position_applied": max_position,
+            "max_position_source": source,
+            "waterfall_rounds": rounds1,
+            "waterfall_reason": wf1,
+            "cash_cap_applied": args.cash_cap,
+            "warning": ("股票池只有 1 只资产，Markowitz 前沿退化（ac-b²=0）；"
+                        "已直接给出受单票上限夹逼的解析解，请勿解读为模型优化结果"),
+            "engine": "stdlib",
+        }
+        out.update(explain_cash(cash_a, n, max_position, args.policy))
+        out["note"] = ("单资产组合无分散效应，权重仅由法规上限决定；"
+                       "如需真正的均值-方差优化请提供 ≥2 只资产")
+        print(json.dumps(out, ensure_ascii=False))
+        return
     iv_o, iv_m = mat_vec(inv, ones), mat_vec(inv, mu)
     a = sum(iv_o)
     b = sum(iv_m)
@@ -321,6 +356,11 @@ def main():
     denom = a * c - b * b
     if abs(denom) < 1e-14:
         sys.exit(json.dumps({"error": "目标收益约束退化，请调整 --target-return"}, ensure_ascii=False))
+    if auto_target:
+        # lam = 0, gam = 1/a —— 闭式解退化为全局最小方差组合
+        if abs(a) < 1e-14:
+            sys.exit(json.dumps({"error": "协方差退化，无法求解最小方差组合"}, ensure_ascii=False))
+        args.target_return = b / a
     lam = (a * args.target_return - b) / denom
     gam = (c - b * args.target_return) / denom
     diag = diagnose_mu(mu, args.target_return, max_position, args.cash_cap)
@@ -334,10 +374,13 @@ def main():
     achieved = sum(w[i] * mu[i] for i in range(n)) / invested if invested > 0 else 0.0
     # v3.3.0 新增：目标收益在数学上无法达成时显式告警，禁止静默输出误导性权重。
     # v3.4.1：先算约束下理论上限再判定，并直接给出可改成什么目标（免 priming 失败重试）。
-    infeasible = achieved < args.target_return - 1e-6
+    # 目标为自动推导（最小方差）时不判"不可达"：目标本身就是该解的性质，
+    # 此时的偏差只来自单票上限夹逼，属于制度约束而非数学无解。
+    infeasible = (not auto_target) and achieved < args.target_return - 1e-6
     out = {
-        "mode": "markowitz",
+        "mode": "markowitz_min_variance" if auto_target else "markowitz",
         "target_return": args.target_return,
+        "target_return_source": ("auto:global_min_variance" if auto_target else "user"),
         "achievable_return_on_invested": round(achieved, 4),
         "target_return_infeasible": infeasible,
         "mu_diagnostics": diag,

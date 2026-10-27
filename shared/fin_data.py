@@ -177,13 +177,34 @@ def _http(url: str, params: dict | None = None, referer: str | None = None,
 # Tencent finance channel (GBK) - survives where eastmoney's push2his is blocked
 # --------------------------------------------------------------------------- #
 def tx_symbol(code: str) -> str:
-    """sh600519 / hk00700 / usAAPL -> tencent symbol form."""
-    c = (code or "").strip().lower()
-    if c[:2] in ("sh", "sz", "hk", "us", "bj"):
-        return c
+    """sh600519 / hk00700 / usAAPL -> tencent symbol form.
+
+    NOTE: only the market prefix is lower-cased. The ticker keeps its own case
+    because Tencent answers with `v_usTSLA="..."` in its GBK payload - lower
+    casing the ticker too ("ustsla") silently produced an empty quote for every
+    US symbol, which made the whole team look dead on US stocks.
+    """
+    raw = (code or "").strip()
+    c = raw.lower()
+    for pfx in ("sh", "sz", "hk", "bj", "us"):
+        if c.startswith(pfx) and len(raw) > len(pfx):
+            return pfx + raw[len(pfx):].upper()
     if c.isdigit():
         return c if len(c) == 5 else ("sh" + c if c.startswith(("6", "9")) else "sz" + c)
-    return "us" + c.upper()
+    return "us" + raw.upper()
+
+
+def tx_symbol_candidates(code: str) -> list:
+    """Symbol variants worth trying, best first.
+
+    Tencent's daily K-line endpoint silently degrades to a two-row stub for bare
+    US tickers (`usTSLA`). Appending the exchange suffix (`usTSLA.OQ`) restores
+    the full history, so we try the qualified form first for US names.
+    """
+    sym = tx_symbol(code)
+    if sym.startswith("us") and "." not in sym[2:]:
+        return [sym + ".OQ", sym]
+    return [sym]
 
 
 def tx_quote(code: str, resolved: dict, **kw):
@@ -218,7 +239,28 @@ def tx_quote(code: str, resolved: dict, **kw):
     }
 
 
-def _bars_from_tencent(payload: dict, sym: str) -> list:
+def _attach_turnover(bars: list, code: str) -> list:
+    """Normalise volume units and derive turnover.
+
+    Unit trap worth 100x: Tencent/Eastmoney report **A-share** volume in 手
+    (lots, 100 shares) while HK and US bars are reported in shares. Feeding the
+    raw field into an ADV calculation silently understates turnover by 100x on
+    A-shares, which makes the execution employee reject every order as
+    "exceeds daily turnover". We publish a normalised `shares` field and derive
+    `amount`, keeping raw `volume` for traceability.
+    """
+    lot = 100.0 if tx_symbol(code)[:2] in ("sh", "sz", "bj") else 1.0
+    unit = "lot(100 shares)" if lot != 1.0 else "share"
+    for b in bars:
+        sh = (b.get("volume") or 0.0) * lot
+        b["volume_unit"] = unit
+        b["shares"] = sh
+        if b.get("amount") is None and b.get("close") is not None:
+            b["amount"] = sh * b["close"]
+    return bars
+
+
+def _bars_from_tencent(payload: dict, sym: str, code: str = "") -> list:
     node = (payload.get("data") or {}).get(sym) or {}
     rows = None
     for key in ("qfqday", "hfqday", "day", "week", "month"):
@@ -234,20 +276,30 @@ def _bars_from_tencent(payload: dict, sym: str) -> list:
             "amount": None, "amplitude": None, "chg_pct": None, "chg": None,
             "turnover": None,
         })
-    return out
+    return _attach_turnover(out, code or sym)
 
 
 def tx_kline(code: str, resolved: dict, days: int = 250, **kw):
-    sym = tx_symbol(code)
-    payload = _http(
-        "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
-        {"param": f"{sym},day,,,{int(days)},qfq"},
-    )
-    bars = _bars_from_tencent(payload, sym)
-    if not bars:
-        raise DataUnavailable(f"tencent kline: empty for {sym}")
+    best, best_n, last_err = None, 0, "no candidate symbols"
+    for sym in tx_symbol_candidates(code):
+        try:
+            payload = _http(
+                "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+                {"param": f"{sym},day,,,{int(days)},qfq"},
+            )
+        except Exception as exc:
+            last_err = f"{type(exc).__name__}: {exc}"
+            continue
+        bars = _bars_from_tencent(payload, sym, code)
+        if len(bars) > best_n:
+            best, best_n = bars, len(bars)
+        if best_n >= 5:                      # good enough: stop early
+            break
+        last_err = f"only {best_n} rows from {sym}"
+    if not best:
+        raise DataUnavailable(f"tencent kline: empty ({last_err})")
     return {"name": resolved.get("name"), "source_detail": "tencent ifzq fqkline",
-            "count": len(bars), "bars": bars}
+            "count": len(best), "bars": best}
 
 
 def sina_kline(code: str, resolved: dict, days: int = 250, **kw):
@@ -275,8 +327,156 @@ def sina_kline(code: str, resolved: dict, days: int = 250, **kw):
         })
     if not out:
         raise DataUnavailable("sina kline: empty")
+    _attach_turnover(out, code)
     return {"name": resolved.get("name"), "source_detail": "sina money api",
             "count": len(out), "bars": out}
+
+
+def nasdaq_kline(code: str, resolved: dict, days: int = 250, **kw):
+    """US daily history straight from Nasdaq's public endpoint.
+
+    Used as a fallback when the Tencent channel cannot serve a US ticker.
+    Date window is widened so that holidays do not shrink the sample.
+    """
+    sym = tx_symbol(code).upper().removeprefix("US").split(".")[0]
+    if not sym:
+        raise DataUnavailable("nasdaq kline: no symbol")
+    today = datetime.now().date()
+    start = today - timedelta(days=int(days) * 2 + 40)
+    payload = _http(
+        f"https://api.nasdaq.com/api/quote/{sym}/historical",
+        {"assetclass": "stocks", "fromdate": start.isoformat(),
+         "todate": today.isoformat(), "limit": str(int(days) + 20)},
+        referer="https://www.nasdaq.com/",
+    )
+    rows = ((((payload.get("data") or {}).get("tradesTable") or {}).get("rows"))
+            or [])
+    out = []
+    for r in rows:
+        def _num(v):
+            return float(str(v).replace("$", "").replace(",", "").strip())
+        try:
+            d = datetime.strptime(r["date"], "%m/%d/%Y").date()
+        except Exception:
+            continue
+        out.append({
+            "date": d.isoformat(), "open": _num(r["open"]), "close": _num(r["close"]),
+            "high": _num(r["high"]), "low": _num(r["low"]),
+            "volume": _num(r["volume"]), "amount": None, "amplitude": None,
+            "chg_pct": None, "chg": None, "turnover": None,
+        })
+    out.sort(key=lambda b: b["date"])
+    out = out[-int(days):]
+    if not out:
+        raise DataUnavailable(f"nasdaq kline: empty for {sym}")
+    return {"name": resolved.get("name"), "source_detail": "nasdaq api historical",
+            "count": len(out), "bars": out}
+
+
+def nasdaq_finance(code: str, resolved: dict, periods: int = 8, **kw):
+    """US income statements from Nasdaq's public API.
+
+    The Eastmoney F10 datacenter only serves A-share accounting data, so without
+    this every US ticker reported "no financial record" and the researcher could
+    not build a DCF. Amounts are absolute USD (the API quotes thousands).
+    """
+    sym = tx_symbol(code).upper().removeprefix("US").split(".")[0]
+    if not sym:
+        raise DataUnavailable("nasdaq finance: no symbol")
+    payload = _http(
+        f"https://api.nasdaq.com/api/company/{sym}/financials",
+        {"frequency": "1"}, referer="https://www.nasdaq.com/")
+    data = payload.get("data") or {}
+    inc = data.get("incomeStatementTable") or {}
+    ratios = data.get("financialRatiosTable") or {}
+
+    def idx_map(table):
+        """value2..value5 -> period '12/31/2025' style labels."""
+        head = table.get("headers") or {}
+        return {k: v for k, v in head.items() if k.startswith("value")
+                and k != "value1"}
+
+    def rows_of(table):
+        out = {}
+        for r in table.get("rows") or []:
+            label = (r.get("value1") or "").strip()
+            if label:
+                out[label] = r
+        return out
+
+    def num(v):
+        s = str(v or "").replace("$", "").replace(",", "").strip()
+        if not s or s in ("--", "-"):
+            return None
+        try:
+            return float(s) * 1000.0        # API unit: thousands of USD
+        except ValueError:
+            return None
+
+    heads = idx_map(inc)
+    if not heads:
+        raise DataUnavailable(f"nasdaq finance: empty for {sym}")
+    inc_rows = rows_of(inc)
+    ratio_rows = rows_of(ratios)
+
+    def pct(label, key):
+        """Ratio belonging to one specific period column, not always the newest."""
+        r = ratio_rows.get(label)
+        if not r:
+            return None
+        s = str(r.get(key) or "").replace("%", "").strip()
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    picks = {
+        "operating_income": "Total Revenue",
+        "operating_profit": "Operating Income",
+        "net_profit": "Net Income",
+        "gross_profit": "Gross Profit",
+    }
+    stmts = []
+    # sort newest period first: decode each column header into a real date
+    cols = []
+    for key in heads:
+        try:
+            cols.append((datetime.strptime(heads[key], "%m/%d/%Y").date(), key))
+        except Exception:
+            cols.append((datetime.min.date(), key))
+    cols.sort(reverse=True)
+    for _, key in cols[:max(1, periods)]:
+        date_raw = heads[key]
+        try:
+            d = datetime.strptime(date_raw, "%m/%d/%Y").date().isoformat()
+        except Exception:
+            d = date_raw
+        stmts.append({
+            "report_date": d,
+            "eps": None,                      # no EPS row in this table
+            "bps": None,
+            "operating_income": num((inc_rows.get(picks["operating_income"]) or {}).get(key)),
+            "operating_income_yoy": None,
+            "operating_profit": num((inc_rows.get(picks["operating_profit"]) or {}).get(key)),
+            "net_profit": num((inc_rows.get(picks["net_profit"]) or {}).get(key)),
+            "net_profit_yoy": None,
+            "gross_profit": num((inc_rows.get(picks["gross_profit"]) or {}).get(key)),
+            "deducted_profit": None,
+            "deducted_profit_yoy": None,
+            "income_yoy": None,
+            "profit_yoy": None,
+            "roe": pct("After Tax ROE", key),
+            "gross_margin": pct("Gross Margin", key),
+            "net_margin": pct("Profit Margin", key),
+            "debt_ratio": None,
+            "operating_cash_flow_ps": None,
+        })
+    if not stmts or all(s.get("net_profit") is None and s.get("operating_income") is None
+                        for s in stmts):
+        raise DataUnavailable(f"nasdaq finance: parsed nothing for {sym}")
+    return {"secucode": f"{sym}.US", "currency": "USD",
+            "source_detail": "nasdaq income statement (units: USD thousands)",
+            "statements": stmts}
 
 
 INDEX_TARGETS = [("sh000001", "上证指数"), ("sz399001", "深证成指"),
@@ -418,9 +618,11 @@ def _first_ok(handlers, code, resolved, **kw):
 
 
 def _kline(code, resolved, days: int = 250, **kw):
-    """K-line with redundancy: tencent -> eastmoney -> sina."""
-    data, _ = _first_ok([tx_kline, em_kline_em, sina_kline], code, resolved,
-                        days=days)
+    """K-line with redundancy: tencent -> eastmoney -> sina -> nasdaq(US)."""
+    chain = [tx_kline, em_kline_em, sina_kline]
+    if detect_market(code) == "us":
+        chain.insert(1, nasdaq_kline)
+    data, _ = _first_ok(chain, code, resolved, days=days)
     return data
 
 
@@ -661,6 +863,91 @@ def em_fund_flow(code: str, resolved: dict, days: int = 20, **kw):
     }
 
 
+def em_finance_hk(code: str, resolved: dict, periods: int = 8, **kw):
+    """Hong Kong income statement (RPT_HKF10_FN_INCOME).
+
+    The HK F10 datacenter exposes a *long* table (one row per line item) instead
+    of the A-share wide table, so we pivot ITEM_NAME -> AMOUNT per report date.
+
+    DATE_TYPE_CODE: 001 annual / 002 interim / 003 Q1.  We prefer annual rows
+    (001) so DCF bases on a full fiscal year, and fall back to the newest
+    available period when a company only discloses shorter periods.
+    """
+    em_code = resolved.get("em_code") or (resolved.get("secid") or "").split(".")[-1]
+    secucode = f"{em_code}.HK"
+    try:
+        payload = _http(
+            "https://datacenter.eastmoney.com/securities/api/data/v1/get",
+            {
+                "reportName": "RPT_HKF10_FN_INCOME",
+                "columns": "ALL",
+                "filter": f'(SECUCODE="{secucode}")',
+                "source": "HSF10", "client": "PC",
+                "sortColumns": "REPORT_DATE", "sortTypes": "-1",
+                "pageSize": "200",
+            },
+            referer="https://emweb.securities.eastmoney.com/",
+        )
+        rows = (payload.get("result") or {}).get("data") or []
+    except Exception as exc:
+        raise DataUnavailable(f"hk finance failed: {exc}")
+    if not rows:
+        raise DataUnavailable(f"no HK income statement for {secucode}")
+
+    # pivot: {(report_date, type): {item_name: amount}}
+    pivoted, currency, name = {}, None, None
+    for r in rows:
+        rd = str(r.get("REPORT_DATE") or "")[:10]
+        if not rd:
+            continue
+        pivoted.setdefault((rd, r.get("DATE_TYPE_CODE")), {})[r.get("ITEM_NAME")] = r.get("AMOUNT")
+        currency = currency or r.get("CURRENCY")
+        name = name or r.get("SECURITY_NAME_ABBR")
+
+    def get(row, *labels):
+        for lb in labels:
+            v = row.get(lb)
+            if v not in (None, "", "-"):
+                return v
+        return None
+
+    # newest first; annual (001) first within the same date ordering
+    ordered = sorted(pivoted.items(),
+                     key=lambda kv: (kv[0][0], kv[0][1] != "001"), reverse=True)
+    annual = [(k, v) for k, v in ordered if k[1] == "001"]
+    chosen = (annual or ordered)[:max(1, periods)]
+
+    stmts = []
+    for (rd, dtype), row in chosen:
+        revenue = get(row, "营业额", "营运收入", "收入")
+        np_ = get(row, "股东应占溢利", "除税后溢利")
+        stmts.append({
+            "report_date": rd,
+            "period_type": "annual" if dtype == "001" else ("interim" if dtype == "002" else "quarterly"),
+            "operating_income": revenue,
+            "net_profit": np_,
+            "gross_profit": get(row, "毛利"),
+            "operating_profit": get(row, "经营溢利"),
+            "pretax_profit": get(row, "除税前溢利"),
+            "eps": get(row, "每股基本盈利"),
+            "eps_diluted": get(row, "每股摊薄盈利"),
+            "gross_margin": round(get(row, "毛利") / revenue * 100, 4)
+                            if (revenue and get(row, "毛利")) else None,
+            "net_margin": round(np_ / revenue * 100, 4) if (revenue and np_) else None,
+            "operating_income_yoy": None,
+            "profit_yoy": None,
+            "roe": None, "bps": None, "debt_ratio": None,
+            "operating_cash_flow_ps": None,
+        })
+    return {
+        "secucode": secucode,
+        "currency": currency or "HKD",
+        "name": name,
+        "source_detail": "eastmoney RPT_HKF10_FN_INCOME (long table pivoted)",
+        "statements": stmts,
+    }
+
+
 def em_finance(code: str, resolved: dict, periods: int = 8, **kw):
     """Key financial indicators from the F10 datacenter (A-share focused)."""
     em_code = resolved.get("em_code") or (resolved.get("secid") or "").split(".")[-1]
@@ -704,10 +991,15 @@ def em_finance(code: str, resolved: dict, periods: int = 8, **kw):
                 "report_date": (pick(r, "REPORT_DATE") or "")[:10] or None,
                 "eps": pick(r, "EPSJB", "EPSKCJB"),
                 "bps": pick(r, "BPS"),
-                "operating_income": pick(r, "TOTAL_OPERATE_INCOME"),
-                "net_profit": pick(r, "PARENT_NETPROFIT"),
-                "income_yoy": pick(r, "YSTZ", "TOTAL_OPERATE_INCOME_SQYO"),
-                "profit_yoy": pick(r, "SJLTZ", "PARENT_NETPROFIT_SQYO"),
+                "operating_income": pick(r, "TOTALOPERATEREVE",
+                                         "TOTAL_OPERATE_INCOME"),
+                "operating_income_yoy": pick(r, "TOTALOPERATEREVETZ"),
+                "net_profit": pick(r, "PARENTNETPROFIT", "PARENT_NETPROFIT"),
+                "net_profit_yoy": pick(r, "PARENTNETPROFITTZ"),
+                "deducted_profit": pick(r, "KCFJCXSYJLR"),
+                "deducted_profit_yoy": pick(r, "KCFJCXSYJLRTZ"),
+                "income_yoy": pick(r, "TOTALOPERATEREVETZ", "YSTZ"),
+                "profit_yoy": pick(r, "PARENTNETPROFITTZ", "SJLTZ"),
                 "roe": pick(r, "ROEJQ", "WEIGHTAVG_ROE"),
                 "gross_margin": pick(r, "XSMLL"),
                 "net_margin": pick(r, "XSJLL"),
@@ -978,6 +1270,49 @@ def yf_for(code: str) -> str | None:
     return None
 
 
+CCY_ALIAS = {
+    "CNY": "CNY", "RMB": "CNY", "人民币": "CNY", "RMB¥": "CNY",
+    "HKD": "HKD", "港元": "HKD", "港币": "HKD",
+    "USD": "USD", "美元": "USD", "US$": "USD",
+}
+
+
+def norm_ccy(v) -> str | None:
+    """Normalise a currency label to CNY / HKD / USD (or None if unknown)."""
+    if v is None:
+        return None
+    s = str(v).strip().upper()
+    return CCY_ALIAS.get(s) or CCY_ALIAS.get(str(v).strip())
+
+
+def fx_rate(code: str = "", resolved: dict | None = None,
+            base: str = "", quote: str = "", **kw):
+    """FX conversion rate (zero dependency, no API key).
+
+    Why this exists: a Hong Kong-listed company trades in HKD but files its
+    statements in RMB.  Feeding an RMB per-share value straight into a
+    comparison against an HKD price silently produces a number that is wrong by
+    ~15%.  We fetch the rate explicitly and let the caller annotate it, rather
+    than pretending the two currencies are the same.
+    """
+    b, q = norm_ccy(base), norm_ccy(quote)
+    if not b or not q:
+        raise DataUnavailable("fx: need --base and --quote (CNY/HKD/USD)")
+    if b == q:
+        return {"base": b, "quote": q, "rate": 1.0, "as_of": None,
+                "source_detail": "identity"}
+    payload = _http(f"https://open.er-api.com/v6/latest/{b}")
+    rates = payload.get("rates") or {}
+    rate = rates.get(q)
+    if not rate:
+        raise DataUnavailable(f"fx: no {b}->{q} quote in feed")
+    return {
+        "base": b, "quote": q, "rate": float(rate),
+        "as_of": payload.get("time_last_update_utc"),
+        "source_detail": "open.er-api.com (ECB reference rates)",
+    }
+
+
 def l3_us_quote(code: str, resolved: dict, **kw):
     yf = _try_import("yfinance")
     if not yf:
@@ -1051,7 +1386,13 @@ ENDPOINTS: dict[str, tuple[list, bool]] = {
     "minute":        ([em_minute],                        True),
     "technical":     ([em_technical],                     True),
     "fund_flow":     ([em_fund_flow],                     True),
-    "finance":       ([em_finance],                       True),
+    # A-shares: Eastmoney F10 (wide). HK: Eastmoney HKF10 income (long, pivoted).
+    # US: Nasdaq income statement (see BUG note there).
+    "finance":       ([(lambda c, r, **k: (nasdaq_finance(c, r, **k)
+                                           if detect_market(c) == "us"
+                                           else (em_finance_hk(c, r, **k)
+                                                 if detect_market(c) == "hk"
+                                                 else em_finance(c, r, **k))))], True),
     "profile":       ([em_profile],                       True),
     "dividend":      ([em_dividend],                      True),
     "shareholder":   ([em_shareholder],                   True),
@@ -1068,6 +1409,7 @@ ENDPOINTS: dict[str, tuple[list, bool]] = {
     "consensus":     ([_l2_only("akshare.stock_zh_valuation_baidu(symbol=..., indicator='PE')")], True),
     "chip":          ([_l2_only("akshare.stock_cyq_em(symbol=...) chip distribution")], True),
     "score":         ([em_technical],                     True),   # transparent composite
+    "fx":            ([fx_rate],                          False),  # HKD/CNY/USD conversion
 }
 
 ENDPOINT_NOTES = {
@@ -1122,6 +1464,7 @@ DESCRIPTIONS = {
     "consensus": "broker consensus (L2 only) / 机构一致预期(需 L2)",
     "chip": "chip distribution (L2 only) / 筹码分布(需 L2)",
     "score": "transparent composite score / 诊股综合评分(透明)",
+    "fx": "FX rate CNY/HKD/USD / 汇率换算(CNY/HKD/USD)",
 }
 
 for _alias, (_target, _reason) in ALIASES.items():
@@ -1141,9 +1484,12 @@ def call(endpoint: str, code: str, **kw) -> dict:
             "note": f"unknown endpoint {endpoint!r}; run `python fin_data.py list`",
         }
     handlers, _needs_symbol = ENDPOINTS[endpoint]
-    resolved = {"market": detect_market(code)}
+    # fx has no security behind it: leaving market at detect_market("") would
+    # print "us", which is simply wrong.
+    resolved = ({} if endpoint == "fx"
+                else {"market": detect_market(code)})
     try:
-        if endpoint not in ("search", "index", "hot", "sector", "north_holding"):
+        if endpoint not in ("search", "index", "hot", "sector", "north_holding", "fx"):
             resolved.update(resolve(code))
     except Exception:
         pass
@@ -1168,6 +1514,10 @@ def call(endpoint: str, code: str, **kw) -> dict:
 
 def _source_of(fn) -> str:
     name = getattr(fn, "__name__", "")
+    if name == "nasdaq_finance":
+        return "L1:nasdaq"
+    if name == "fx_rate":
+        return "L1:ecb-reference-rates"
     for prefix, label in (("l2_", "L2:akshare"), ("l3_", "L3:yfinance"),
                           ("tx_", "L1:tencent"), ("sina_", "L1:sina")):
         if name.startswith(prefix):
@@ -1184,6 +1534,10 @@ def main(argv=None) -> int:
     ap.add_argument("code", nargs="?", default=None)
     ap.add_argument("--days", type=int, default=250)
     ap.add_argument("--size", type=int, default=10)
+    ap.add_argument("--base", default=None,
+                    help="fx only: source currency (CNY/HKD/USD)")
+    ap.add_argument("--quote", default=None,
+                    help="fx only: target currency (CNY/HKD/USD)")
     ap.add_argument("--json", action="store_true", help="machine readable output")
     args = ap.parse_args(argv)
 
@@ -1192,6 +1546,7 @@ def main(argv=None) -> int:
         for k, (_, need_symbol) in ENDPOINTS.items():
             print(f"  {k:<15} {'<code>' if need_symbol else '':<7} {DESCRIPTIONS.get(k,'')}")
         print("\nExample: python fin_data.py quote sh600519 --json")
+        print("         python fin_data.py fx --base CNY --quote HKD")
         return 0
 
     if ENDPOINTS.get(args.endpoint, (None, True))[1] and not args.code:
@@ -1201,6 +1556,12 @@ def main(argv=None) -> int:
     kw = {"days": args.days}
     if args.endpoint in ("news", "notice", "hot", "sector"):
         kw["size"] = args.size
+    if args.endpoint == "fx":
+        if not args.base or not args.quote:
+            print("error: fx needs --base and --quote, e.g. "
+                  "--base CNY --quote HKD", file=sys.stderr)
+            return 2
+        kw["base"], kw["quote"] = args.base, args.quote
     result = call(args.endpoint, args.code or "", **kw)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

@@ -103,12 +103,41 @@ def build_suitability_ctx(inv):
     会得出不同结论，圆桌共识就无从谈起。
     """
     ctx = dict(inv or {})
-    c, r = risk_rank(inv.get("investor_risk_level")), risk_rank(inv.get("product_risk_level"))
+    # 字段别名容错：上游员工常把画像字段写成 risk_level / product_level /
+    # tolerance 等近似名。读不到就静默跳过 SU 段，等于对适当性违规"查无此事"，
+    # 是最危险的假阴性，因此这里先做一次归一化再求值。
+    aliases = {
+        "investor_risk_level": ("investor_risk_level", "risk_level",
+                                "investor_level", "risk_tolerance", "risk_appetite"),
+        "product_risk_level": ("product_risk_level", "risk_level_of_product",
+                               "product_level", "product_risk"),
+        "investor_type": ("investor_type", "is_professional", "investor_category"),
+    }
+    norm = dict(inv or {})
+    for target, sources in aliases.items():
+        if target not in norm:
+            for s in sources:
+                if inv.get(s) is not None:
+                    norm[target] = inv[s]
+                    break
+    if isinstance(norm.get("investor_type"), bool):
+        norm["investor_type"] = "professional" if norm["investor_type"] else "retail"
+    ctx.update(norm)
+
+    c, r = risk_rank(norm.get("investor_risk_level")), risk_rank(norm.get("product_risk_level"))
+    ctx["su_evaluable"] = c is not None and r is not None
+    if not ctx["su_evaluable"]:
+        # 无法判定必须显式暴露，禁止伪装成"无适当性问题"
+        ctx["su_skip_reason"] = (
+            "投资者画像缺少可识别的 investor_risk_level / product_risk_level"
+            "（已尝试别名 %s），SU-01/SU-02/SU-03 未执行；报告中不得表述为"
+            "『适当性合规』，须标注『适当性未校验』"
+            % ", ".join(sum(aliases.values(), ())))
     if c is not None and r is not None:
         ctx["suitability_mismatch"] = r > c
     elif inv:
         ctx["suitability_mismatch"] = None
-    is_prof = str(inv.get("investor_type", "")).lower() == "professional"
+    is_prof = str(norm.get("investor_type", "")).lower() == "professional"
     if (not is_prof) and r is not None and isinstance(inv.get("active_recommendation"), bool):
         ctx["high_risk_push_to_retail"] = bool(r >= 4 and inv.get("active_recommendation"))
     elif inv:

@@ -16,6 +16,10 @@ team_package.json
 logs/
 *.log
 
+# 端到端演练与压测产生的临时文件（不是交付物）
+.tmpout/
+testdata/
+
 # ---- 私有数据 / private data ----
 # 你的真实持仓清单不要提交到公开仓库
 watchlist.json

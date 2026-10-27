@@ -46,6 +46,56 @@ print(r["status"], r["source"], r["data"]["price"])
 }
 ```
 
+## ⚠️ 单位陷阱（务必读完）Unit traps you must read
+
+| 字段 Field | 单位 Unit | 说明 Note |
+|---|---|---|
+| `bar.volume` | A股「手」(100 shares) / 港美股「股」(shares) | **原始值，勿直接当股数用** |
+| `bar.shares` | 股 shares | 已按市场归一化 Use this one |
+| `bar.amount` | 元 CNY / HKD / USD | 由 `shares × close` 推导 Derived, not billed data |
+| `quote.float_mv` / `total_mv` | 亿 (100 million) | 见响应中的 `unit_note` |
+| `finance.statements[*]` | 元 CNY / USD | **看 `data.currency`，港股常为人民币** |
+
+> 曾经的真实事故：把「手」当「股」计算 20 日日均成交额（ADV），结果缩小 100 倍，
+> 导致交易执行官把**每一笔**订单都判成"超过单日成交额、禁止执行"。
+> A real incident: reading lots as shares understated ADV by 100x, so the
+> execution employee refused every single order.
+
+### 💱 币种陷阱 Currency trap
+
+港股公司**以 HKD 报价、却以人民币披露财报**。若直接拿人民币的每股价值去比 HKD 现价，
+结果会系统性低估约 15%，而且**不会报任何错**——这是本项目最忌讳的静默错误。
+
+Hong Kong issuers are **priced in HKD but file statements in RMB**. Dividing an RMB
+per-share value by an HKD price is silently ~15% wrong. Always check
+`data.currency` against the quote currency and convert with the `fx` endpoint.
+
+```bash
+python shared/fin_data.py fx --base CNY --quote HKD
+# {"rate": 1.173631, "as_of": "Tue, 27 Oct 2026 00:02:31", ...}
+
+# 自检：USD/HKD 应落在港元联系汇率区间 7.75–7.85
+python shared/fin_data.py fx --base HKD --quote USD     # 0.127471 → 1/0.127471 = 7.845 ✅
+```
+
+## 跨市场覆盖 Market coverage
+
+| 端点 Endpoint | A股 CN | 港股 HK | 美股 US |
+|---|---|---|---|
+| `quote` 实时行情 | ✅ | ✅ | ✅ |
+| `kline` 日K（含复权） | ✅ | ✅ | ✅ 腾讯 + Nasdaq 双源 |
+| `finance` 财报 | ✅ 东财 F10 宽表 | ✅ 东财 HKF10 利润表（长表转置） | ✅ Nasdaq 利润表 |
+| `fx` 汇率 | ✅ CNY/HKD/USD 互换 | ✅ | ✅ |
+| `news` / `index` / `search` | ✅ | ✅ | ✅ |
+
+**三市场全覆盖。** 港股财报走 `RPT_HKF10_FN_INCOME`，返回长表（一科目一行），
+本层已按报告期转置并优先取年报（`DATE_TYPE_CODE=001`）；币种随响应给出。
+HK statements arrive as a long table (one row per line item); this layer pivots it
+per report date and prefers annual reports.
+
+取不到的组合一律返回 `status: "unavailable"` 并带 `note` 说明，**不会用邻近市场的数据顶替**。
+Misses return `unavailable` with a reason — never substituted with another market's data.
+
 ## 三级通道 Three tiers
 
 | Tier | 覆盖 Coverage | 依赖 Requirement |
