@@ -240,9 +240,20 @@ v4.2.0 pushed all three markets to green and surfaced four more:
 | 9 | Tesla's DCF prints \$18.83 against a \$391.62 price and looks broken | A net-profit-as-FCFF proxy simply does not suit a high-growth name | **Method-applicability guard**: when the gap exceeds 50%, say so and recommend relative / sum-of-the-parts valuation as the primary method |
 | 10 | When financials are unavailable, the report still prints "DCF centre ¥385.2" | The skip branch fell back to the spot price but the verdict text did not change | Print "DCF skipped (reason)" — never dress up the spot price as a valuation |
 
-> Rows 4, 6 and 8 are *silent* failures: no exception, no warning, just confidently
-> wrong output. They are the best argument for this project's rule — prefer an
-> honest `unavailable` over a quietly backfilled estimate.
+v4.3.0 ran the nine as a chain, which immediately exposed row 11 — **employees
+that could not talk to each other**:
+
+| # | Symptom | Root cause | Fix |
+|---|---|---|---|
+| 11 | Feeding the quant's weights into the risk officer fails with `weights must sum to 1`, breaking the pipeline | Under the public-fund "double ten" rule a 3-name pool can only be 30% invested, so the quant correctly returns 30% equity + 70% cash — but the risk officer demanded the weights alone sum to 1 | VaR and stress-test gain `--cash`: require *weights + cash = 1*, treat cash as zero-vol, and scale historical shocks by equity exposure |
+| | The e2e harness had bypassed this with a single asset and `--weights 1.0` | Which meant the quant→risk chain was **never actually tested** | The harness now passes the real portfolio weights and cash through, on all three markets |
+
+> Before vs after: under the 2015 crash scenario a 30%-invested portfolio went from
+> **-42.75% (full-exposure basis, badly overstated)** to **-13.5% (equity-exposure basis)**.
+
+> Rows 4, 6, 8 and 11 are *silent* or chain-breaking failures: no exception, just a
+> confidently wrong number — or a pipeline that jams. They are the best argument for
+> this project's rule — prefer an honest `unavailable` over a quietly backfilled estimate.
 
 ---
 

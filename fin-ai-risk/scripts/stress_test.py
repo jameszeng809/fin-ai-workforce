@@ -35,7 +35,9 @@ def load_scenarios():
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--weights", required=True, help="持仓权重，逗号分隔，和为 1")
+    p.add_argument("--weights", required=True, help="风险资产权重，逗号分隔")
+    p.add_argument("--cash", type=float, default=0.0,
+                   help="现金权重。权重之和 + 本值 须为 1；现金在情景中不受冲击")
     p.add_argument("--industries", default=None,
                    help="每只持仓所属行业，逗号分隔，长度与 weights 一致（用于 SC-SECTOR）")
     p.add_argument("--beta", type=float, default=1.0,
@@ -55,8 +57,17 @@ def main():
     if not w or any(x < 0 for x in w):
         sys.exit(json.dumps({"error": "weights 不能为空或含负值"}, ensure_ascii=False))
     s = sum(w)
-    if abs(s - 1.0) > 0.01:
-        sys.exit(json.dumps({"error": f"权重和必须为 1，当前为 {round(s, 4)}"}, ensure_ascii=False))
+    # 与 var.py 同口径：风险资产 + 现金 = 1。公募"双十"下股票池不足 9 只时
+    # 必然留有现金，硬性要求和为 1 会让 量化→风控 链路直接断掉。
+    invested_w = s
+    if not -1e-9 <= args.cash <= 1 + 1e-9:
+        sys.exit(json.dumps({"error": f"--cash 必须在 0~1 之间，当前 {args.cash}"},
+                            ensure_ascii=False))
+    if abs(s + args.cash - 1.0) > 0.01:
+        sys.exit(json.dumps(
+            {"error": f"权重之和({s:.4f}) + 现金({args.cash:.4f}) 必须为 1。"
+                      f"若组合留有现金，请用 --cash 显式声明"},
+            ensure_ascii=False))
 
     if args.beta <= 0:
         sys.exit(json.dumps({"error": "beta 必须为正"}, ensure_ascii=False))
@@ -103,8 +114,11 @@ def main():
             if shock is None:
                 results.append({"id": sid, "error": "历史情景缺少 index_shock 字段"})
                 continue
-            loss = shock * args.beta
-            detail = f"指数冲击 {shock} × beta {args.beta}"
+            # 现金仓位在冲击中不受损，因此组合损失 = 权益暴露 × 指数冲击 × beta。
+            # 少了这一步，30% 仓位的组合会被算成满仓挨跌。
+            loss = shock * args.beta * invested_w
+            detail = (f"权益暴露 {round(invested_w, 4)} × 指数冲击 {shock} "
+                      f"× beta {args.beta}")
         else:
             ap = sc.get("apply")
             if not ap:
@@ -138,6 +152,8 @@ def main():
 
     out = {
         "inputs": {"n_positions": len(w), "beta": args.beta,
+                   "cash_weight": round(args.cash, 4),
+                   "invested_weight": round(invested_w, 4),
                    "top_industry_weight": round(top_ind, 4) if top_ind is not None else None,
                    "max_position_weight": round(max_pos, 4),
                    "illiquid_weight": round(illiquid_w, 4)},

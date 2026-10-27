@@ -259,20 +259,65 @@ def main() -> int:
                                        f"infeasible={mv['data'].get('target_return_infeasible')}"
                                if mv.get("ok") else None)
 
-    var = run_script("fin-ai-risk", "var.py",
-                     ["--weights", "1.0", "--vols", f"{daily_vol * (244 ** 0.5):.4f}",
-                      "--corr", "1", "--n", "20000"])
-    results["risk.var"] = step("risk · VaR / CVaR", var,
-                               lambda: f"VaR95(1d)={var['data'].get('var_95_1d')} "
-                                       f"CVaR99={var['data'].get('cvar_99_1d')}"
-                               if var.get("ok") else None)
+    # 真实联动：直接把量化分析师输出的权重（含现金）喂给风控官。
+    # 早先用单资产 + "--weights 1.0" 绕过了这一步，等于没验证 量化→风控 这条链。
+    # 公募"双十"下股票池常不满仓，因此必须连 --cash 一起传过去。
+    rp_w = (rp.get("data") or {}).get("weights") or []
+    rp_cash = (rp.get("data") or {}).get("cash_weight") or 0.0
+    if rp_w:
+        w_csv = ",".join(f"{x:.6f}" for x in rp_w)
+        # 波动率取自各资产的真实日收益年化；相关性矩阵来自 quant 的实算结果
+        # pool_rets 的形状是 [交易日][资产]，这里转置成 [资产][交易日] 再统计
+        by_asset = [list(col) for col in zip(*pool_rets)]
+        per_vol = []
+        for series in by_asset:
+            m = sum(series) / len(series)
+            v = sum((x - m) ** 2 for x in series) / (len(series) - 1)
+            per_vol.append((v * 244) ** 0.5)
+        vols_csv = ",".join(f"{v:.6f}" for v in per_vol)
+        k = len(rp_w)
+        n = len(by_asset[0])
+        stats = []
+        for s in by_asset:
+            m = sum(s) / len(s)
+            sd = (sum((x - m) ** 2 for x in s) / (len(s) - 1)) ** 0.5
+            stats.append((m, sd))
+        corr_rows = []
+        for a in range(k):
+            row = []
+            for b in range(k):
+                if a == b:
+                    row.append("1")
+                else:
+                    ma, sa = stats[a]
+                    mb, sb = stats[b]
+                    cov = sum((by_asset[a][i] - ma) * (by_asset[b][i] - mb)
+                              for i in range(n)) / (n - 1)
+                    row.append(f"{cov / (sa * sb):.4f}")
+            corr_rows.append(",".join(row))
+        corr_csv = ";".join(corr_rows)
+        var = run_script("fin-ai-risk", "var.py",
+                         ["--weights", w_csv, "--vols", vols_csv,
+                          "--corr", corr_csv, "--cash", f"{rp_cash:.6f}",
+                          "--n", "20000"])
+        results["risk.var"] = step("risk · VaR / CVaR", var,
+                                   lambda: f"VaR95(1d)={var['data'].get('var_95_1d')} "
+                                           f"CVaR99={var['data'].get('cvar_99_1d')} "
+                                           f"| 权益 {round(1 - rp_cash, 2)} 现金 {round(rp_cash, 2)}"
+                                   if var.get("ok") else None)
 
-    st_stress = run_script("fin-ai-risk", "stress_test.py",
-                           ["--weights", "1.0", "--beta", "1.0"])
-    worst = (st_stress.get("data", {}).get("worst_scenario") or {})
-    results["risk.stress"] = step("risk · 历史情景压力测试", st_stress,
-                                  lambda: f"最差={worst.get('name')} {worst.get('portfolio_loss_pct')}%"
-                                  if st_stress.get("ok") else None)
+        st_stress = run_script("fin-ai-risk", "stress_test.py",
+                               ["--weights", w_csv, "--beta", "1.0",
+                                "--cash", f"{rp_cash:.6f}"])
+        worst = (st_stress.get("data", {}).get("worst_scenario") or {})
+        results["risk.stress"] = step("risk · 历史情景压力测试", st_stress,
+                                      lambda: f"最差={worst.get('name')} "
+                                              f"{worst.get('portfolio_loss_pct')}%"
+                                              f"（已按 {round(1 - rp_cash, 2)} 权益暴露折算）"
+                                      if st_stress.get("ok") else None)
+    else:
+        results["risk.var"] = {"ok": False}
+        results["risk.stress"] = {"ok": False}
 
     nwize = [{"name": "默认实体", "title": it.get("title") or "",
               "entity": "", "published_at": (it.get("date") or "2026-10-25 09:00:00")[:19]}

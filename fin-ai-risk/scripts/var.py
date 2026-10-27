@@ -61,9 +61,12 @@ def percentile(vals, q):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--weights", required=True, help="逗号分隔权重，和须为 1")
+    p.add_argument("--weights", required=True,
+                   help="逗号分隔权重（风险资产部分）")
     p.add_argument("--vols", required=True, help="逗号分隔年化波动率")
     p.add_argument("--corr", required=True, help="分号分隔的相关性矩阵")
+    p.add_argument("--cash", type=float, default=0.0,
+                   help="现金权重。权重之和 + 本值 须为 1；现金波动率按 0 计入")
     p.add_argument("--n", type=int, default=10000)
     args = p.parse_args()
 
@@ -71,8 +74,18 @@ def main():
     vols = [float(x) for x in args.vols.split(",")]
     if len(w) != len(vols):
         sys.exit(json.dumps({"error": "weights 与 vols 长度不一致"}, ensure_ascii=False))
-    if abs(sum(w) - 1.0) > 0.01:
-        sys.exit(json.dumps({"error": "权重之和必须为 1"}, ensure_ascii=False))
+    # 组合应当 100% 被解释：风险资产 + 现金。量化分析师在公募"双十"口径下
+    # 常常只能投 30%，若这里仍要求和为 1，整条 量化→风控 流水线就会断链。
+    # 因此把现金作为显式仓位纳入，既保留了"权重必须凑满 1"的防错意义，
+    # 又让现金流自然地把组合波动率压低——这才是真实的组合 VaR。
+    if not -1e-9 <= args.cash <= 1 + 1e-9:
+        sys.exit(json.dumps({"error": f"--cash 必须在 0~1 之间，当前 {args.cash}"},
+                            ensure_ascii=False))
+    if abs(sum(w) + args.cash - 1.0) > 0.01:
+        sys.exit(json.dumps(
+            {"error": f"权重之和({sum(w):.4f}) + 现金({args.cash:.4f}) 必须为 1。"
+                      f"若组合留有现金，请用 --cash 显式声明，而不是把风险资产权重凑成 1"},
+            ensure_ascii=False))
     n = len(w)
     corr = parse_corr(args.corr, n)
 
@@ -100,11 +113,14 @@ def main():
     print(json.dumps({
         "n": args.n,
         "seed": SEED,
+        "cash_weight": round(args.cash, 4),
+        "invested_weight": round(sum(w), 4),
         "var_95_1d": round(var95, 4),
         "var_99_1d": round(var99, 4),
         "cvar_99_1d": round(cvar99, 4),
         "var_95_10d": round(var95 * math.sqrt(10), 4),
-        "note": "输出为损失比例；正态假设低估尾部，极端情景请配合 scenarios.json 压力测试使用",
+        "note": ("输出为损失比例，已按现金仓位（波动率 0）计入组合口径；"
+                 "正态假设低估尾部，极端情景请配合 scenarios.json 压力测试使用"),
         "engine": "stdlib-cholesky(seed=42)",
     }, ensure_ascii=False))
 
